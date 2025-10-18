@@ -7,13 +7,13 @@ on:
 
 env:
   # --- ECR/AWS Environment Variables ---
-  AWS_DEFAULT_REGION: eu-west-3     # CORRECTED: Aligned with S3 Backend
+  AWS_DEFAULT_REGION: eu-west-3
   ECR_REPOSITORY: java-maven
   AWS_ACCOUNT_ID: 766363046258
   
   # --- Terraform variables ---
-  TF_VAR_region: eu-west-3          # CORRECTED
-  TF_VAR_avail_zone: eu-west-3a     # CORRECTED
+  TF_VAR_region: eu-west-3
+  TF_VAR_avail_zone: eu-west-3a
   
 jobs:
 # ----------------------------------------------------------------------
@@ -40,17 +40,23 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_DEFAULT_REGION }} # Now eu-west-3
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
       
       - name: Terraform Init
         id: init
         run: |
-          # The backend config will now match the configured credentials
-          terraform init -backend-config="bucket=myapp-bucket" -backend-config="key=myapp/state.tfstate" -backend-config="region=${{ env.TF_VAR_region }}"
+          terraform init \
+            -backend-config="bucket=myapp-bucket-0193" \
+            -backend-config="key=myapp/state.tfstate" \
+            -backend-config="region=${{ env.TF_VAR_region }}"
           
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -out=tfplan
+        
       - name: Terraform Apply
         id: apply
-        run: terraform apply -auto-approve
+        run: terraform apply -auto-approve tfplan
         
       - name: Get EC2 Public IP Output
         id: output
@@ -61,7 +67,6 @@ jobs:
     outputs:
       ec2_host: ${{ steps.output.outputs.EC2_PUBLIC_IP }}
 
----
 # ----------------------------------------------------------------------
 # 2. BUILD, PUSH, AND DEPLOYMENT JOB
 # ----------------------------------------------------------------------
@@ -96,11 +101,10 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_DEFAULT_REGION }} # Now eu-west-3
+          aws-region: us-east-1
 
       - name: Login to ECR and Build/Push Docker Image
         run: |
-          # ECR is in us-east-1, so we must explicitly tell the AWS CLI to target us-east-1
           ECR_REGION="us-east-1"
           ECR_URI="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${ECR_REGION}.amazonaws.com"
           IMAGE_TAG="$ECR_URI/${{ env.ECR_REPOSITORY }}:latest"
@@ -124,10 +128,9 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ env.DEPLOY_HOST }}
-          username: ubuntu # Change to 'ec2-user' if using Amazon Linux 2 AMI
+          username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            # ECR is in us-east-1, so we must explicitly tell the AWS CLI to target us-east-1
             ECR_REGION="us-east-1"
             ECR_URI="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${ECR_REGION}.amazonaws.com"
             IMAGE_TAG="$ECR_URI/${{ env.ECR_REPOSITORY }}:latest"
@@ -136,7 +139,7 @@ jobs:
             aws ecr get-login-password --region $ECR_REGION \
               | docker login --username AWS --password-stdin $ECR_URI
 
-            # Step 2: Pull the new image, stop/start containers
+            # Pull the new image, stop/start containers
             cd /home/ubuntu/lms_frontend 
             
             docker pull $IMAGE_TAG
