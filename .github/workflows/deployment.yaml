@@ -3,17 +3,17 @@ name: LMS Frontend DEV CI/CD
 on:
   push:
     branches:
-      - main
+      - develop
 
 env:
-  # --- ECR/AWS Environment Variables (UPDATED) ---
-  AWS_DEFAULT_REGION: us-east-1 # Reverted to us-east-1
-  ECR_REPOSITORY: java-maven     # Updated ECR repository name
-  AWS_ACCOUNT_ID: 766363046258 # Updated AWS Account ID
+  # --- ECR/AWS Environment Variables ---
+  AWS_DEFAULT_REGION: eu-west-3     # CORRECTED: Aligned with S3 Backend
+  ECR_REPOSITORY: java-maven
+  AWS_ACCOUNT_ID: 766363046258
   
-  # --- Terraform variables (Ensure your main.tf also uses us-east-1) ---
-  TF_VAR_region: us-east-1
-  TF_VAR_avail_zone: us-east-1a
+  # --- Terraform variables ---
+  TF_VAR_region: eu-west-3          # CORRECTED
+  TF_VAR_avail_zone: eu-west-3a     # CORRECTED
   
 jobs:
 # ----------------------------------------------------------------------
@@ -40,12 +40,12 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }} # Now eu-west-3
       
       - name: Terraform Init
         id: init
         run: |
-          # Note: Ensure your S3 backend bucket is in the correct region (us-east-1)
+          # The backend config will now match the configured credentials
           terraform init -backend-config="bucket=myapp-bucket" -backend-config="key=myapp/state.tfstate" -backend-config="region=${{ env.TF_VAR_region }}"
           
       - name: Terraform Apply
@@ -96,15 +96,17 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }} # Now eu-west-3
 
       - name: Login to ECR and Build/Push Docker Image
         run: |
-          ECR_URI="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_DEFAULT_REGION }}.amazonaws.com"
+          # ECR is in us-east-1, so we must explicitly tell the AWS CLI to target us-east-1
+          ECR_REGION="us-east-1"
+          ECR_URI="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${ECR_REGION}.amazonaws.com"
           IMAGE_TAG="$ECR_URI/${{ env.ECR_REPOSITORY }}:latest"
           
-          # Login to ECR (us-east-1)
-          aws ecr get-login-password --region ${{ env.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin $ECR_URI
+          # Login to ECR in us-east-1
+          aws ecr get-login-password --region $ECR_REGION | docker login --username AWS --password-stdin $ECR_URI
 
           # Build Docker Image
           docker build -t $IMAGE_TAG .
@@ -125,12 +127,13 @@ jobs:
           username: ubuntu # Change to 'ec2-user' if using Amazon Linux 2 AMI
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            # Step 1: Login to ECR on the EC2 instance (us-east-1)
-            ECR_URI="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_DEFAULT_REGION }}.amazonaws.com"
+            # ECR is in us-east-1, so we must explicitly tell the AWS CLI to target us-east-1
+            ECR_REGION="us-east-1"
+            ECR_URI="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${ECR_REGION}.amazonaws.com"
             IMAGE_TAG="$ECR_URI/${{ env.ECR_REPOSITORY }}:latest"
             
             # Re-login to ECR on the remote server
-            aws ecr get-login-password --region ${{ env.AWS_DEFAULT_REGION }} \
+            aws ecr get-login-password --region $ECR_REGION \
               | docker login --username AWS --password-stdin $ECR_URI
 
             # Step 2: Pull the new image, stop/start containers
