@@ -1,0 +1,144 @@
+name: LMS Frontend DEV CI/CD
+
+on:
+  push:
+    branches:
+      - develop
+
+env:
+  # --- ECR/AWS Environment Variables (UPDATED) ---
+  AWS_DEFAULT_REGION: us-east-1 # Reverted to us-east-1
+  ECR_REPOSITORY: java-maven     # Updated ECR repository name
+  AWS_ACCOUNT_ID: 766363046258 # Updated AWS Account ID
+  
+  # --- Terraform variables (Ensure your main.tf also uses us-east-1) ---
+  TF_VAR_region: us-east-1
+  TF_VAR_avail_zone: us-east-1a
+  
+jobs:
+# ----------------------------------------------------------------------
+# 1. INFRASTRUCTURE PROVISIONING JOB (Terraform)
+# ----------------------------------------------------------------------
+  terraform-provision:
+    name: Provision Infrastructure
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./terraform
+        
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.0.0
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+      
+      - name: Terraform Init
+        id: init
+        run: |
+          # Note: Ensure your S3 backend bucket is in the correct region (us-east-1)
+          terraform init -backend-config="bucket=myapp-bucket" -backend-config="key=myapp/state.tfstate" -backend-config="region=${{ env.TF_VAR_region }}"
+          
+      - name: Terraform Apply
+        id: apply
+        run: terraform apply -auto-approve
+        
+      - name: Get EC2 Public IP Output
+        id: output
+        run: |
+          EC2_PUBLIC_IP=$(terraform output -raw ec2_public_ip)
+          echo "EC2_PUBLIC_IP=$EC2_PUBLIC_IP" >> $GITHUB_OUTPUT
+
+    outputs:
+      ec2_host: ${{ steps.output.outputs.EC2_PUBLIC_IP }}
+
+---
+# ----------------------------------------------------------------------
+# 2. BUILD, PUSH, AND DEPLOYMENT JOB
+# ----------------------------------------------------------------------
+  build-and-deploy:
+    name: Build, Push, and Deploy
+    runs-on: ubuntu-latest
+    needs: terraform-provision
+    
+    env:
+      DEPLOY_HOST: ${{ needs.terraform-provision.outputs.ec2_host }}
+      
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      # --- Build Steps ---
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build project
+        run: npm run build
+
+      # --- AWS/ECR Steps ---
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Login to ECR and Build/Push Docker Image
+        run: |
+          ECR_URI="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_DEFAULT_REGION }}.amazonaws.com"
+          IMAGE_TAG="$ECR_URI/${{ env.ECR_REPOSITORY }}:latest"
+          
+          # Login to ECR (us-east-1)
+          aws ecr get-login-password --region ${{ env.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin $ECR_URI
+
+          # Build Docker Image
+          docker build -t $IMAGE_TAG .
+
+          # Push Docker Image
+          docker push $IMAGE_TAG
+
+      # --- EC2 Initialization Delay ---
+      - name: ⏳ Wait for EC2 Initialization (90 seconds)
+        run: sleep 90s
+        shell: bash
+
+      # --- Deployment Steps ---
+      - name: Deploy to Server (SSH and Docker Compose)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.DEPLOY_HOST }}
+          username: ubuntu # Change to 'ec2-user' if using Amazon Linux 2 AMI
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Step 1: Login to ECR on the EC2 instance (us-east-1)
+            ECR_URI="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_DEFAULT_REGION }}.amazonaws.com"
+            IMAGE_TAG="$ECR_URI/${{ env.ECR_REPOSITORY }}:latest"
+            
+            # Re-login to ECR on the remote server
+            aws ecr get-login-password --region ${{ env.AWS_DEFAULT_REGION }} \
+              | docker login --username AWS --password-stdin $ECR_URI
+
+            # Step 2: Pull the new image, stop/start containers
+            cd /home/ubuntu/lms_frontend 
+            
+            docker pull $IMAGE_TAG
+            
+            docker compose down || true
+            docker compose up -d
+
+            echo "✅ LMS frontend deployed successfully to EC2 instance at ${{ env.DEPLOY_HOST }}"
