@@ -10,9 +10,7 @@ variable avail_zone {
 variable env_prefix {
     default = "dev"
 }
-variable my_ip {
-    default = "51.44.162.117"
-}
+
 
 variable instance_type {
     default = "t3.micro"
